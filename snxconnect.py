@@ -235,7 +235,7 @@ class HTMLRequester(object):
         if data:
             data = data.encode('ascii')
         rq = Request(url, data)
-        self.f = f = self.opener.open(rq, timeout=25)
+        self.f = f = self.opener.open(rq, timeout=60)
         if do_soup:
             # Sometimes we get incomplete read. So we read everything
             # the server sent us and hope this is ok. Note: This means
@@ -419,7 +419,11 @@ def main():
     rq = HTMLRequester(args)
     result = rq.login()
     if result:
-        rq.call_snx()
+        try:
+            rq.call_snx()
+        except KeyboardInterrupt:
+            print('Closed VPN connection.')
+            sys.exit(0)
 
 
 # end def main ()
