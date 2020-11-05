@@ -7,6 +7,7 @@ import sys
 import socket
 import rsa
 import ssl
+import re
 
 from urllib.request import build_opener, HTTPCookieProcessor, Request, HTTPSHandler
 from urllib.parse import urlencode
@@ -100,7 +101,7 @@ class HTMLRequester(object):
 
     # end def debug
 
-    def generate_snx_info(self):
+    def generate_snx_info(self, extender_vars):
         """ Communication with SNX (originally by the java framework) is
             done via an undocumented binary format. We try to reproduce
             this here. We asume native byte-order but we don't know if
@@ -109,7 +110,7 @@ class HTMLRequester(object):
         """
         magic = b'\x13\x11\x00\x00'
         length = 0x3d0
-        gw_ip = socket.gethostbyname(self.extender_vars['host_name'])
+        gw_ip = socket.gethostbyname(extender_vars['host_name'])
         gw_int = unpack("!I", socket.inet_aton(gw_ip))[0]
         fmt = b'=4sLL64sL6s256s256s128s256sH'
         info = pack(
@@ -117,13 +118,13 @@ class HTMLRequester(object):
             magic,
             length,
             gw_int,
-            self.extender_vars['host_name'],
-            int(self.extender_vars['port']),
+            extender_vars['host_name'],
+            int(extender_vars['port']),
             b'',
-            self.extender_vars['server_cn'],
-            self.extender_vars['user_name'],
-            self.extender_vars['password'],
-            self.extender_vars['server_fingerprint'],
+            extender_vars['server_cn'],
+            extender_vars['user_name'],
+            extender_vars['password'],
+            extender_vars['server_fingerprint'],
             1  # ???
         )
         assert len(info) == length + 8  # magic + length
@@ -142,9 +143,9 @@ class HTMLRequester(object):
             self.open()
             self.debug(self.purl)
             if self.purl.endswith('Portal/Main'):
-                self.open('SNX/extender')
-                self.parse_extender()
-                self.generate_snx_info()
+                page = self.open_with_response('SNX/extender')
+                extender_vars = self.parse_extender(page)
+                self.generate_snx_info(extender_vars)
                 return True
             else:
                 # Forget Cookies, otherwise we get a 400 bad request later
@@ -198,11 +199,11 @@ class HTMLRequester(object):
             if self.args.save_cookies:
                 self.jar.save(self.args.cookiefile, ignore_discard=True)
             self.debug("purl: %s" % self.purl)
-            self.open('SNX/extender')
+            page = self.open_with_response('SNX/extender')
             self.debug(self.purl)
             self.debug(self.info)
-            self.parse_extender()
-            self.generate_snx_info()
+            extender_vars = self.parse_extender(page)
+            self.generate_snx_info(extender_vars)
             return True
         elif self.purl.endswith('Login/Login'):
             errorMsg = self.soup.find(id='ErrorMsg')
@@ -235,6 +236,7 @@ class HTMLRequester(object):
 
     # end def next_file
 
+    # @deprecated Use open_with_response
     def open(self, filepart=None, data=None, do_soup=True):
         filepart = filepart or self.nextfile
         url = '/'.join(('%s:/' % self.args.protocol, self.args.host, filepart))
@@ -255,40 +257,46 @@ class HTMLRequester(object):
         self.purl = f.geturl()
         self.info = f.info()
 
+    def open_with_response(self, filepart=None, data=None):
+        filepart = filepart or self.nextfile
+        url = '/'.join(('%s:/' % self.args.protocol, self.args.host, filepart))
+        if data:
+            data = data.encode('ascii')
+        rq = Request(url, data)
+        self.f = f = self.opener.open(rq, timeout=25)
+
+        try:
+            page = f.read().decode('utf-8')
+        except IncompleteRead as e:
+            page = e.partial
+
+        self.purl = f.geturl()
+        self.info = f.info()
+
+        return page
+
     # end def open
 
-    def parse_extender(self):
+    def parse_extender(self, content):
         """ The SNX extender page contains the necessary credentials for
             connecting the VPN. This information then passed to the snx
             program via a socket.
         """
-        for script in self.soup.find_all('script'):
-            if '/* Extender.user_name' in script.text:
-                break
-        else:
-            print("Error retrieving extender variables")
-            return
+        token_match = re.findall(r'(\/\* Extender.*)', content, re.MULTILINE)
 
-        match_line = None
-        for line in script.text.split('\n'):
-            if '/* Extender.user_name' in line:
-                match_line = line
-                break
+        if len(token_match) == 0:
+            print('Could not find extender token')
 
-        stmts = match_line.split(';')
+        match = re.findall(r'(Extender\.([\w_]+)\ ?=\ ?\"([\w\. \,]+)?\";)+\ ', token_match[0], re.MULTILINE)
+
+        if len(match) == 0:
+            print('Could not find any values in extender token')
+
         variables = {}
-        for stmt in stmts:
-            try:
-                lhs, rhs = stmt.split('=')
-            except ValueError:
-                break
-            try:
-                lhs = lhs.split('.', 1)[1].strip()
-            except IndexError:
-                continue
-            rhs = rhs.strip().strip('"')
-            variables[lhs] = rhs.encode('utf-8')
-        self.extender_vars = variables
+        for item in match:
+            variables[item[1]] = item[2].encode('utf-8')
+
+        return variables
 
     # end def parse_extender
 
