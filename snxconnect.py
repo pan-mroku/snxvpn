@@ -31,13 +31,6 @@ from subprocess import Popen, PIPE
     - Log debug logs to syslog
 """
 
-
-def iter_bytes(x):
-    x_bytes = bytes(x)
-    for i in range(len(x_bytes)):
-        yield (x_bytes[i:i + 1])
-
-
 class HTMLRequester(object):
 
     def __init__(self, args):
@@ -59,7 +52,6 @@ class HTMLRequester(object):
         if self.args.ssl_noverify:
             handlers.append(HTTPSHandler(context=context))
         self.opener = build_opener(*handlers)
-        self.nextfile = args.file
 
     # end def __init__
 
@@ -137,10 +129,11 @@ class HTMLRequester(object):
         return ''.join('%02x' % c for c in reversed(result))
 
     def login(self):
+        filepart = 'Portal/Main'
+
         if self.has_cookies:
             self.debug("has cookie")
-            self.nextfile = 'Portal/Main'
-            self.open()
+            self.open(filepart)
             self.debug(self.purl)
             if self.purl.endswith('Portal/Main'):
                 page = self.open_with_response('SNX/extender')
@@ -150,30 +143,32 @@ class HTMLRequester(object):
             else:
                 # Forget Cookies, otherwise we get a 400 bad request later
                 self.jar.clear()
-                self.next_file(self.purl)
-        self.debug(self.nextfile)
-        self.open()
+                filepart = self.clean_url(self.purl)
+        self.open(filepart)
         self.debug(self.purl)
+
         # Get the RSA parameters from the javascript in the received html
         for script in self.soup.find_all('script'):
             if 'RSA' in script.attrs.get('src', ''):
-                self.next_file(script['src'])
-                self.debug(self.nextfile)
+                new_filepart = self.clean_url(script['src'])
                 break
         else:
             print('No RSA javascript file found, cannot login')
             return
-        self.open(do_soup=False)
+
+        self.open(new_filepart, do_soup=False)
         self.parse_rsa_params()
         if not self.modulus:
             # Error message already given in parse_rsa_params
             return
+
+
         for form in self.soup.find_all('form'):
             if 'id' in form.attrs and form['id'] == 'loginForm':
-                self.next_file(form['action'])
+                action_filepart = self.clean_url(form['action'])
+
                 assert form['method'] == 'post'
                 break
-        self.debug(self.nextfile)
         self.debug(self.purl)
 
         d = dict(
@@ -184,16 +179,16 @@ class HTMLRequester(object):
             vpid_prefix=self.args.vpid_prefix,
             HeightData=self.args.height_data
         )
-        self.open(data=urlencode(d))
+        self.open(action_filepart, data=urlencode(d))
         self.debug(self.purl)
         self.debug(self.info)
         while 'MultiChallenge' in self.purl:
-            d = self.parse_pw_response()
+            multichallenge_filepart, d = self.parse_pw_response()
             otp = getpass('One-time Password: ')
             d['password'] = self.rsa_encrypt(otp)
-            self.debug("nextfile: %s" % self.nextfile)
+            self.debug("nextfile: %s" % filepart)
             self.debug("purl: %s" % self.purl)
-            self.open(data=urlencode(d))
+            self.open(multichallenge_filepart, data=urlencode(d))
             self.debug("info: %s" % self.info)
         if self.purl.endswith('Portal/Main'):
             if self.args.save_cookies:
@@ -222,23 +217,22 @@ class HTMLRequester(object):
 
     # end def login
 
-    def next_file(self, fname):
+    def clean_url(self, fname):
         if fname.startswith('/'):
-            self.nextfile = fname.lstrip('/')
-        elif fname.startswith('http'):
-            self.nextfile = fname.split('/', 3)[-1]
-        else:
-            dir = self.nextfile.split('/')
-            dir = dir[:-1]
-            fn = fname.split('/')
-            self.nextfile = '/'.join(dir + fn)
-            # We might try to remove '..' elements in the future
+            return fname.lstrip('/')
 
-    # end def next_file
+        if fname.startswith('http'):
+            return fname.split('/', 3)[-1]
+
+        if fname.startswith('../'):
+            return '/'.join(fname.split('/')[1:])
+
+        raise Exception('Dead code. ', fname)
+
+    # end def clean_url
 
     # @deprecated Use open_with_response
     def open(self, filepart=None, data=None, do_soup=True):
-        filepart = filepart or self.nextfile
         url = '/'.join(('%s:/' % self.args.protocol, self.args.host, filepart))
         if data:
             data = data.encode('ascii')
@@ -257,8 +251,7 @@ class HTMLRequester(object):
         self.purl = f.geturl()
         self.info = f.info()
 
-    def open_with_response(self, filepart=None, data=None):
-        filepart = filepart or self.nextfile
+    def open_with_response(self, filepart, data=None):
         url = '/'.join(('%s:/' % self.args.protocol, self.args.host, filepart))
         if data:
             data = data.encode('ascii')
@@ -309,7 +302,7 @@ class HTMLRequester(object):
 
         for form in self.soup.find_all('form'):
             if 'name' in form.attrs and form['name'] == 'MCForm':
-                self.next_file(form['action'])
+                url = self.clean_url(form['action'])
                 match_form = form
                 assert form['method'] == 'post'
                 break
@@ -322,7 +315,7 @@ class HTMLRequester(object):
             if form_input['name'] in ('password', 'btnCancel'):
                 continue
             d[form_input['name']] = form_input.attrs.get('value', '')
-        return d
+        return url, d
 
     # end def parse_pw_response
 
