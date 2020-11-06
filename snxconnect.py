@@ -34,8 +34,6 @@ from subprocess import Popen, PIPE
 class HTMLRequester(object):
 
     def __init__(self, args):
-        self.modulus = None
-        self.exponent = None
         self.args = args
         self.jar = j = LWPCookieJar()
         self.has_cookies = False
@@ -124,8 +122,8 @@ class HTMLRequester(object):
 
     # end def generate_snx_info
 
-    def rsa_encrypt(self, value):
-        result = rsa.pkcs1.encrypt(value.encode('ascii'), rsa.PublicKey(self.modulus, self.exponent))
+    def rsa_encrypt(self, value, modulus, exponent):
+        result = rsa.pkcs1.encrypt(value.encode('ascii'), rsa.PublicKey(modulus, exponent))
         return ''.join('%02x' % c for c in reversed(result))
 
     def login(self):
@@ -133,7 +131,7 @@ class HTMLRequester(object):
 
         if self.has_cookies:
             self.debug("has cookie")
-            self.open(filepart)
+            self.open_with_response(filepart)
             self.debug(self.purl)
             if self.purl.endswith('Portal/Main'):
                 page = self.open_with_response('SNX/extender')
@@ -144,11 +142,14 @@ class HTMLRequester(object):
                 # Forget Cookies, otherwise we get a 400 bad request later
                 self.jar.clear()
                 filepart = self.clean_url(self.purl)
-        self.open(filepart)
+
+        response = self.open_with_response(filepart)
         self.debug(self.purl)
 
+        soup = BeautifulSoup(response, "lxml")
+
         # Get the RSA parameters from the javascript in the received html
-        for script in self.soup.find_all('script'):
+        for script in soup.find_all('script'):
             if 'RSA' in script.attrs.get('src', ''):
                 new_filepart = self.clean_url(script['src'])
                 break
@@ -156,47 +157,43 @@ class HTMLRequester(object):
             print('No RSA javascript file found, cannot login')
             return
 
-        self.open(new_filepart, do_soup=False)
-        self.parse_rsa_params()
-        if not self.modulus:
+        js_response = self.open_with_response(new_filepart)
+        modulus, exponent = self.parse_rsa_params(js_response)
+        if not modulus:
             # Error message already given in parse_rsa_params
             return
 
-
-        for form in self.soup.find_all('form'):
+        for form in soup.find_all('form'):
             if 'id' in form.attrs and form['id'] == 'loginForm':
-                action_filepart = self.clean_url(form['action'])
+                new_filepart = self.clean_url(form['action'])
 
                 assert form['method'] == 'post'
                 break
         self.debug(self.purl)
 
         d = dict(
-            password=self.rsa_encrypt(self.args.password),
+            password=self.rsa_encrypt(self.args.password, modulus, exponent),
             userName=self.args.username,
             selectedRealm=self.args.realm,
             loginType=self.args.login_type,
             vpid_prefix=self.args.vpid_prefix,
             HeightData=self.args.height_data
         )
-        self.open(action_filepart, data=urlencode(d))
+        response = self.open_with_response(new_filepart, data=urlencode(d))
         self.debug(self.purl)
-        self.debug(self.info)
         while 'MultiChallenge' in self.purl:
-            multichallenge_filepart, d = self.parse_pw_response()
+            multichallenge_filepart, d = self.parse_pw_response(response)
             otp = getpass('One-time Password: ')
-            d['password'] = self.rsa_encrypt(otp)
+            d['password'] = self.rsa_encrypt(otp, modulus, exponent)
             self.debug("nextfile: %s" % filepart)
             self.debug("purl: %s" % self.purl)
-            self.open(multichallenge_filepart, data=urlencode(d))
-            self.debug("info: %s" % self.info)
+            response = self.open_with_response(multichallenge_filepart, data=urlencode(d))
         if self.purl.endswith('Portal/Main'):
             if self.args.save_cookies:
                 self.jar.save(self.args.cookiefile, ignore_discard=True)
             self.debug("purl: %s" % self.purl)
             page = self.open_with_response('SNX/extender')
             self.debug(self.purl)
-            self.debug(self.info)
             extender_vars = self.parse_extender(page)
             self.generate_snx_info(extender_vars)
             return True
@@ -231,32 +228,12 @@ class HTMLRequester(object):
 
     # end def clean_url
 
-    # @deprecated Use open_with_response
-    def open(self, filepart=None, data=None, do_soup=True):
-        url = '/'.join(('%s:/' % self.args.protocol, self.args.host, filepart))
-        if data:
-            data = data.encode('ascii')
-        rq = Request(url, data)
-        self.f = f = self.opener.open(rq, timeout=25)
-        if do_soup:
-            # Sometimes we get incomplete read. So we read everything
-            # the server sent us and hope this is ok. Note: This means
-            # we cannot pass the file to BeautifulSoup but need to read
-            # everything here.
-            try:
-                page = f.read()
-            except IncompleteRead as e:
-                page = e.partial
-            self.soup = BeautifulSoup(page, "lxml")
-        self.purl = f.geturl()
-        self.info = f.info()
-
     def open_with_response(self, filepart, data=None):
         url = '/'.join(('%s:/' % self.args.protocol, self.args.host, filepart))
         if data:
             data = data.encode('ascii')
         rq = Request(url, data)
-        self.f = f = self.opener.open(rq, timeout=25)
+        f = self.opener.open(rq, timeout=25)
 
         try:
             page = f.read().decode('utf-8')
@@ -264,7 +241,6 @@ class HTMLRequester(object):
             page = e.partial
 
         self.purl = f.geturl()
-        self.info = f.info()
 
         return page
 
@@ -293,14 +269,16 @@ class HTMLRequester(object):
 
     # end def parse_extender
 
-    def parse_pw_response(self):
+    def parse_pw_response(self, content):
         """ The password response contains another form where the
             one-time password (in our case received via a message to the
             phone) must be entered.
         """
+        soup = BeautifulSoup(content, "lxml")
+
         match_form = None
 
-        for form in self.soup.find_all('form'):
+        for form in soup.find_all('form'):
             if 'name' in form.attrs and form['name'] == 'MCForm':
                 url = self.clean_url(form['action'])
                 match_form = form
@@ -319,11 +297,10 @@ class HTMLRequester(object):
 
     # end def parse_pw_response
 
-    def parse_rsa_params(self):
+    def parse_rsa_params(self, response):
         keys = ('modulus', 'exponent')
         vars = {}
-        for line in self.f:
-            line = line.decode('utf-8')
+        for line in response.split('\n'):
             for k in keys:
                 if 'var %s' % k in line:
                     val = line.strip().rstrip(';')
@@ -337,8 +314,10 @@ class HTMLRequester(object):
             print('No RSA parameters found, cannot login')
             return
         self.debug(repr(vars))
-        self.modulus = int(vars['modulus'], 16)
-        self.exponent = int(vars['exponent'], 16)
+        modulus = int(vars['modulus'], 16)
+        exponent = int(vars['exponent'], 16)
+
+        return modulus, exponent
     # end def parse_rsa_params
 
 # end class HTML_Requester
