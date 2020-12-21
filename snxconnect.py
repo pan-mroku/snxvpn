@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 from __future__ import print_function, unicode_literals
 import os
@@ -198,14 +198,12 @@ class HTMLRequester(object):
             self.generate_snx_info(extender_vars)
             return True
         elif self.purl.endswith('Login/Login'):
-            errorMsg = self.soup.find(id='ErrorMsg')
-            if errorMsg is None:
-                errorMsg = self.soup.find(id='errorMsgDIV')
-            if errorMsg is not None:
-                for error in errorMsg.find_all('span'):
-                    print("Error response: %s" % error.string)
+            find_pattern = r'var loginErrorMsg = "(.*)";'
+            match = re.search(find_pattern, response)
+            if match is None:
+                print("Unknown error: %s" % response)
             else:
-                print("Error response: %s" % self.soup)
+                print("Remote response with the error: %s" % match.group(1))
             return
         else:
             print("Unexpected response, looking for MultiChallenge or Portal")
