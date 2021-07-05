@@ -262,15 +262,17 @@ class HTMLRequester(object):
             connecting the VPN. This information then passed to the snx
             program via a socket.
         """
+        extender_found = False
         for script in self.soup.find_all('script'):
-            if '/* Extender.user_name' in script.text:
+            if script.string and '/* Extender.user_name' in script.string:
+                extender_found = True
                 break
-        else:
+        if not extender_found:
             print("Error retrieving extender variables")
             return
 
         match_line = None
-        for line in script.text.split('\n'):
+        for line in script.string.split('\n'):
             if '/* Extender.user_name' in line:
                 match_line = line
                 break
@@ -426,6 +428,8 @@ def main():
     result = rq.login()
     if result:
         rq.call_snx()
+    else:
+        print('Failed to login')
 
 
 # end def main ()
